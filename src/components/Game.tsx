@@ -6,6 +6,7 @@ import {
   HighScore, isHighScore, loadHighScores, loadMode, loadName,
   Mode, MODE_META, saveHighScore, saveMode, saveName,
 } from "../game/highscores";
+import { buildCuratedHand, loadRange, RangeKey, saveRange } from "../game/practiceRange";
 import { PlayingCard } from "./PlayingCard";
 import { Burst, ParticleLayer } from "./Particles";
 import { GameOverScreen, HighScoreTable, PauseScreen, StartScreen } from "./Screens";
@@ -55,6 +56,7 @@ export default function Game() {
   const [handsSinceCountPrompt, setHandsSinceCountPrompt] = useState(0);
   const [mode, setModeState] = useState<Mode>(() => loadMode());
   const [showChart, setShowChart] = useState(false);
+  const [range, setRangeState] = useState<Set<RangeKey>>(() => loadRange());
 
   const burstIdRef = useRef(0);
   const toastIdRef = useRef(0);
@@ -64,6 +66,14 @@ export default function Game() {
   // never deals a hand using the previous mode's rules.
   const modeRef = useRef(mode);
   useEffect(() => { modeRef.current = mode; }, [mode]);
+  // dealHand reads the practice range through a ref for the same reason as modeRef.
+  const rangeRef = useRef(range);
+  useEffect(() => { rangeRef.current = range; }, [range]);
+
+  const setRange = useCallback((next: Set<RangeKey>) => {
+    setRangeState(next);
+    saveRange(next);
+  }, []);
 
   // Load best score on mount
   useEffect(() => {
@@ -122,10 +132,34 @@ export default function Game() {
     const countOnly = modeRef.current === "count";
     // Counting-only mode deals extra cards so the count moves faster and feels alive.
     const n = countOnly ? 5 : 4;
-    const { drawn, rest } = drawCards(n, s);
-    // Order dealt: player, dealer, player, dealer
-    const p = countOnly ? [drawn[0], drawn[2], drawn[4]] : [drawn[0], drawn[2]];
-    const d = [drawn[1], drawn[3]]; // dealer[1] is hole card
+
+    // With an active practice range, deal only hands that land on a selected spot.
+    const wantCurated = !countOnly && rangeRef.current.size > 0;
+    let curated = wantCurated ? buildCuratedHand(rangeRef.current, s) : null;
+    if (wantCurated && !curated) {
+      // The selected spots can't be built from the remaining shoe (ranks
+      // depleted, or a 2-card-impossible row like hard 20) — reshuffle and
+      // retry once, then fall back to a normal random deal.
+      s = makeShoe(6);
+      setRunningCount(0);
+      pushToast("SHUFFLE", "#f5c46b");
+      curated = buildCuratedHand(rangeRef.current, s);
+    }
+
+    let p: Card[];
+    let d: Card[];
+    let rest: Card[];
+    if (curated) {
+      p = curated.player;
+      d = [curated.dealerUp, curated.hole]; // dealer[1] is hole card
+      rest = curated.rest;
+    } else {
+      const { drawn, rest: remaining } = drawCards(n, s);
+      // Order dealt: player, dealer, player, dealer
+      p = countOnly ? [drawn[0], drawn[2], drawn[4]] : [drawn[0], drawn[2]];
+      d = [drawn[1], drawn[3]];
+      rest = remaining;
+    }
     setPlayer(p);
     setDealer(d);
     // In counting mode every card is face-up — nothing is hidden from the counter.
@@ -165,9 +199,12 @@ export default function Game() {
     setPhase("playing");
     setNewHigh(false);
     sfx.start();
+    if (rangeRef.current.size > 0 && modeRef.current !== "count") {
+      setTimeout(() => pushToast("RANGE PRACTICE", "#f5c46b"), 400);
+    }
     // Give the first hand
     setTimeout(() => dealHand(fresh), 250);
-  }, [dealHand]);
+  }, [dealHand, pushToast]);
 
   const changeMode = useCallback((m: Mode) => {
     if (m === mode) return;
@@ -400,10 +437,15 @@ export default function Game() {
             </button>
             <button
               onClick={() => { setShowChart(true); sfx.click(); }}
-              className="btn-juice w-9 h-9 rounded-lg bg-white/10 border border-white/20 text-white flex items-center justify-center"
-              title="Basic strategy card (C)"
+              className="btn-juice relative w-9 h-9 rounded-lg bg-white/10 border border-white/20 text-white flex items-center justify-center"
+              title={range.size > 0
+                ? `Basic strategy card (C) · practicing ${range.size} spot${range.size === 1 ? "" : "s"}`
+                : "Basic strategy card (C)"}
             >
               📋
+              {range.size > 0 && (
+                <span className="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-amber-400 border border-black/60" />
+              )}
             </button>
             <button
               onClick={() => setShowHighScores(true)}
@@ -603,6 +645,8 @@ export default function Game() {
         open={showChart}
         onClose={() => { setShowChart(false); sfx.click(); }}
         highlight={liveChartCell}
+        range={range}
+        onRangeChange={setRange}
       />
     </div>
   );
