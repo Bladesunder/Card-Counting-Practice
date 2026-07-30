@@ -23,15 +23,18 @@ export const MODE_META: Record<Mode, { title: string; short: string; blurb: stri
 
 export interface HighScore {
   name: string;
-  score: number;
-  accuracy: number;
   streak: number;
-  hands: number;
+  timeMs: number;
+  avgMsPerHand: number;
   date: number;
   mode?: Mode;
 }
 
-const KEY = "hilo-ace-highscores-v1";
+const KEY = "hilo-ace-highscores-v2";
+
+function rankEntries(list: HighScore[]): HighScore[] {
+  return list.sort((a, b) => b.streak - a.streak || a.avgMsPerHand - b.avgMsPerHand);
+}
 
 export function loadHighScores(): HighScore[] {
   try {
@@ -39,7 +42,7 @@ export function loadHighScores(): HighScore[] {
     if (!raw) return [];
     const arr = JSON.parse(raw) as HighScore[];
     if (!Array.isArray(arr)) return [];
-    return arr.sort((a, b) => b.score - a.score).slice(0, 10);
+    return rankEntries(arr).slice(0, 10);
   } catch {
     return [];
   }
@@ -48,18 +51,17 @@ export function loadHighScores(): HighScore[] {
 export function saveHighScore(entry: HighScore): HighScore[] {
   const list = loadHighScores();
   list.push(entry);
-  list.sort((a, b) => b.score - a.score);
-  const trimmed = list.slice(0, 10);
+  const trimmed = rankEntries(list).slice(0, 10);
   try {
     localStorage.setItem(KEY, JSON.stringify(trimmed));
   } catch {}
   return trimmed;
 }
 
-export function isHighScore(score: number): boolean {
+export function isHighScore(streak: number): boolean {
   const list = loadHighScores();
-  if (list.length < 10) return score > 0;
-  return score > list[list.length - 1].score;
+  if (list.length < 10) return streak > 0;
+  return streak > list[list.length - 1].streak;
 }
 
 export function loadMode(): Mode {

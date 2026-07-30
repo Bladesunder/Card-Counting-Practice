@@ -106,7 +106,7 @@ export function StartScreen({
 
         {best > 0 && (
           <div className="mt-3 text-neutral-400 text-sm">
-            Best score: <span className="text-amber-300 font-bold">{best.toLocaleString()}</span>
+            Best streak: <span className="text-amber-300 font-bold">×{best}</span>
           </div>
         )}
         <p className="mt-4 text-[10px] text-neutral-500 leading-relaxed">
@@ -176,10 +176,12 @@ export function PauseScreen({
 }
 
 export function GameOverScreen({
-  score,
-  hands,
-  correct,
-  bestStreak,
+  streak,
+  accuracy,
+  timeMs,
+  avgMsPerHand,
+  lastMistake,
+  rangeActive,
   onRestart,
   onMenu,
   newHigh,
@@ -188,10 +190,12 @@ export function GameOverScreen({
   onSave,
   mode,
 }: {
-  score: number;
-  hands: number;
-  correct: number;
-  bestStreak: number;
+  streak: number;
+  accuracy: number;
+  timeMs: number;
+  avgMsPerHand: number;
+  lastMistake: string | null;
+  rangeActive: boolean;
   onRestart: () => void;
   onMenu: () => void;
   newHigh: boolean;
@@ -200,7 +204,6 @@ export function GameOverScreen({
   onSave: () => void;
   mode: Mode;
 }) {
-  const acc = hands > 0 ? Math.round((correct / hands) * 100) : 0;
   const [saved, setSaved] = useState(false);
   return (
     <div className="absolute inset-0 z-30 flex flex-col items-center justify-center px-4 backdrop-blur-md bg-black/70">
@@ -211,14 +214,26 @@ export function GameOverScreen({
           {MODE_META[mode].icon} {MODE_META[mode].title}
         </div>
 
-        <div className="mt-6 grid grid-cols-2 gap-3 bg-white/5 rounded-2xl p-4 border border-white/10">
-          <Stat label="Score" value={score.toLocaleString()} highlight />
-          <Stat label="Accuracy" value={`${acc}%`} />
-          <Stat label="Hands" value={String(hands)} />
-          <Stat label="Best streak" value={String(bestStreak)} />
+        {lastMistake && (
+          <div className="mt-4 px-4 py-2 rounded-xl bg-red-500/15 border border-red-400/30 text-red-200 text-sm font-bold">
+            {lastMistake}
+          </div>
+        )}
+
+        <div className="mt-4 grid grid-cols-2 gap-3 bg-white/5 rounded-2xl p-4 border border-white/10">
+          <Stat label="Streak" value={`×${streak}`} highlight />
+          <Stat label="Time spent" value={fmtDuration(timeMs)} />
+          <Stat label="Avg per hand" value={fmtAvg(avgMsPerHand)} />
+          <Stat label="Accuracy" value={`${accuracy}%`} />
         </div>
 
-        {newHigh && !saved && (
+        {rangeActive && (
+          <div className="mt-4 p-3 rounded-xl bg-white/5 border border-white/10 text-neutral-400 text-xs">
+            Range practice — high scores don't count
+          </div>
+        )}
+
+        {newHigh && !saved && !rangeActive && (
           <div className="mt-4 p-3 rounded-xl bg-amber-500/20 border border-amber-400/40">
             <div className="text-amber-300 font-bold text-sm">🏆 NEW HIGH SCORE!</div>
             <div className="mt-2 flex gap-2">
@@ -267,6 +282,17 @@ function Stat({ label, value, highlight }: { label: string; value: string; highl
   );
 }
 
+export function fmtDuration(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function fmtAvg(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
 export function HighScoreTable({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [scores, setScores] = useState<HighScore[]>([]);
   useEffect(() => {
@@ -297,11 +323,13 @@ export function HighScoreTable({ open, onClose }: { open: boolean; onClose: () =
                   <div className="flex-1 min-w-0">
                     <div className="font-bold text-white truncate leading-tight">{s.name || "Anon"}</div>
                     <div className="text-[9px] uppercase tracking-wider text-neutral-500">
-                      {s.mode ? MODE_META[s.mode].short : "BOTH"} · {s.hands} hands
+                      {s.mode ? MODE_META[s.mode].short : "BOTH"} · {fmtDuration(s.timeMs)} · {fmtAvg(s.avgMsPerHand)}/hand
+                    </div>
+                    <div className="text-[9px] text-neutral-600">
+                      {new Date(s.date).toLocaleString()}
                     </div>
                   </div>
-                  <div className="text-xs text-neutral-400">{s.accuracy}%</div>
-                  <div className="w-20 text-right font-black text-amber-300">{s.score.toLocaleString()}</div>
+                  <div className="w-14 text-right font-black text-amber-300">×{s.streak}</div>
                 </div>
               ))}
             </div>

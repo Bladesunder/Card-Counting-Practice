@@ -9,7 +9,7 @@ import {
 import { buildCuratedHand, loadRange, RangeKey, saveRange } from "../game/practiceRange";
 import { PlayingCard } from "./PlayingCard";
 import { Burst, ParticleLayer } from "./Particles";
-import { GameOverScreen, HighScoreTable, PauseScreen, StartScreen } from "./Screens";
+import { fmtDuration, GameOverScreen, HighScoreTable, PauseScreen, StartScreen } from "./Screens";
 import { StrategyChart } from "./StrategyChart";
 import { cn } from "../utils/cn";
 
@@ -24,7 +24,6 @@ interface Toast {
   y: number;
 }
 
-const LIVES_START = 3;
 const RESHUFFLE_AT = 60; // reshuffle when shoe has < 60 cards left of 312 (6 decks)
 
 export default function Game() {
@@ -37,7 +36,6 @@ export default function Game() {
   const [score, setScore] = useState(0);
   const [combo, setCombo] = useState(0);
   const [bestCombo, setBestCombo] = useState(0);
-  const [lives, setLives] = useState(LIVES_START);
   const [hands, setHands] = useState(0);
   const [correctCount, setCorrectCount] = useState(0);
   const [runningCount, setRunningCount] = useState(0); // ground truth
@@ -51,15 +49,21 @@ export default function Game() {
   const [showHighScores, setShowHighScores] = useState(false);
   const [muted, setMutedState] = useState(isMuted());
   const [newHigh, setNewHigh] = useState(false);
+  const [lastMistake, setLastMistake] = useState<string | null>(null);
+  const [finalTimeMs, setFinalTimeMs] = useState(0);
   const [name, setName] = useState(loadName());
   const [bestOverall, setBestOverall] = useState(0);
   const [handsSinceCountPrompt, setHandsSinceCountPrompt] = useState(0);
   const [mode, setModeState] = useState<Mode>(() => loadMode());
   const [showChart, setShowChart] = useState(false);
   const [range, setRangeState] = useState<Set<RangeKey>>(() => loadRange());
+  const [elapsedMs, setElapsedMs] = useState(0);
 
   const burstIdRef = useRef(0);
   const toastIdRef = useRef(0);
+  const startedAtRef = useRef(0);
+  const pausedMsRef = useRef(0);
+  const pauseStartRef = useRef(0);
   const boardRef = useRef<HTMLDivElement>(null);
   const shakeTimerRef = useRef<number | null>(null);
   // dealHand reads the mode through a ref so a mode-switch + immediate restart
@@ -70,15 +74,44 @@ export default function Game() {
   const rangeRef = useRef(range);
   useEffect(() => { rangeRef.current = range; }, [range]);
 
+  // The run clock is held while paused (Esc) and during count checks — the
+  // player is being quizzed on the past, not making a timed decision. Guarding
+  // on the boolean transition avoids losing a held segment when Esc is pressed
+  // mid-count-check.
+  const timerHeld = phase === "paused" || sub === "countPrompt";
+  useEffect(() => {
+    if (timerHeld) {
+      if (pauseStartRef.current === 0) pauseStartRef.current = Date.now();
+    } else if (pauseStartRef.current > 0) {
+      pausedMsRef.current += Date.now() - pauseStartRef.current;
+      pauseStartRef.current = 0;
+    }
+  }, [timerHeld]);
+
+  // Elapsed run time, including any in-flight held segment in the deduction.
+  const getElapsedMs = () => {
+    const held = pausedMsRef.current + (pauseStartRef.current > 0 ? Date.now() - pauseStartRef.current : 0);
+    return Math.max(0, Date.now() - startedAtRef.current - held);
+  };
+
+  // Live timer for the HUD. During a count check getElapsedMs freezes on its
+  // own; the interval only runs while playing so pause freezes the display too.
+  useEffect(() => {
+    if (phase !== "playing") return;
+    setElapsedMs(getElapsedMs());
+    const id = window.setInterval(() => setElapsedMs(getElapsedMs()), 1000);
+    return () => window.clearInterval(id);
+  }, [phase]);
+
   const setRange = useCallback((next: Set<RangeKey>) => {
     setRangeState(next);
     saveRange(next);
   }, []);
 
-  // Load best score on mount
+  // Load best streak on mount
   useEffect(() => {
     const list = loadHighScores();
-    if (list.length > 0) setBestOverall(list[0].score);
+    if (list.length > 0) setBestOverall(list[0].streak);
   }, []);
 
   const pushBurst = useCallback((x: number, y: number, color: string, kind: Burst["kind"] = "spark") => {
@@ -190,7 +223,6 @@ export default function Game() {
     setScore(0);
     setCombo(0);
     setBestCombo(0);
-    setLives(LIVES_START);
     setHands(0);
     setCorrectCount(0);
     setRunningCount(0);
@@ -198,6 +230,12 @@ export default function Game() {
     setHandsSinceCountPrompt(0);
     setPhase("playing");
     setNewHigh(false);
+    setLastMistake(null);
+    setFinalTimeMs(0);
+    setElapsedMs(0);
+    startedAtRef.current = Date.now();
+    pausedMsRef.current = 0;
+    pauseStartRef.current = 0;
     sfx.start();
     if (rangeRef.current.size > 0 && modeRef.current !== "count") {
       setTimeout(() => pushToast("RANGE PRACTICE", "#f5c46b"), 400);
@@ -219,11 +257,14 @@ export default function Game() {
   }, [mode, phase, startGame]);
 
   const endGame = useCallback(() => {
+    // Range-practice runs never touch the leaderboard.
+    const rangeActive = rangeRef.current.size > 0 && modeRef.current !== "count";
+    setFinalTimeMs(getElapsedMs());
     sfx.gameover();
     doShake("md");
     setPhase("gameover");
-    setNewHigh(isHighScore(score));
-  }, [score, doShake]);
+    setNewHigh(!rangeActive && isHighScore(bestCombo));
+  }, [bestCombo, doShake]);
 
   // Handle player action
   const handleAction = useCallback((action: Action) => {
@@ -262,13 +303,17 @@ export default function Game() {
       sfx.correct();
       if (nc > 1) sfx.combo(nc);
     } else {
+      // One strike ends the run — reveal the hole card and go to game over.
       setCombo(0);
-      setLives((l) => l - 1);
-      setFeedback({ ok: false, msg: `✗ Wrong — correct: ${ACTION_LABEL[right]} (${explainAction(player, dealerUp, right)})` });
+      const msg = `✗ Wrong — correct: ${ACTION_LABEL[right]} (${explainAction(player, dealerUp, right)})`;
+      setFeedback({ ok: false, msg });
+      setLastMistake(msg);
       pushBurst(centerX, centerY, "#ef4444", "spark");
-      pushToast(`−1 LIFE`, "#ef4444", centerX, centerY - 60);
       sfx.wrong();
-      doShake("md");
+      setVisibleDealer(dealer);
+      setRunningCount((rc) => rc + hiLoValue(dealer[1].rank));
+      endGame();
+      return;
     }
 
     // Reveal dealer hole card + update running count
@@ -276,7 +321,7 @@ export default function Game() {
     setRunningCount((rc) => rc + hiLoValue(dealer[1].rank));
 
     setSub("feedback");
-  }, [phase, sub, player, dealer, combo, pushBurst, pushToast, doShake, endGame]);
+  }, [phase, sub, player, dealer, combo, pushBurst, pushToast, endGame]);
 
   // Advance from feedback → maybe count prompt → deal next
   const advance = useCallback(() => {
@@ -290,8 +335,6 @@ export default function Game() {
         setSub("countPrompt");
         setUserCount(0);
       } else {
-        // Check lives; if 0, endGame
-        if (lives <= 0) { endGame(); return; }
         dealHand();
       }
     } else if (sub === "countPrompt") {
@@ -313,11 +356,12 @@ export default function Game() {
         pushToast(`COUNT! +${bonus}`, "#60a5fa", cx, cy - 60);
         sfx.correct();
       } else {
+        // One strike ends the run.
         setCombo(0);
-        setLives((l) => l - 1);
-        pushToast(`Miscount: was ${runningCount > 0 ? `+${runningCount}` : runningCount}`, "#ef4444", cx, cy - 60);
+        setLastMistake(`Miscounted — running count was ${runningCount > 0 ? `+${runningCount}` : runningCount}`);
         sfx.wrong();
-        doShake("md");
+        endGame();
+        return;
       }
       // Teach the running → true count conversion after every check.
       setFeedback({
@@ -325,15 +369,9 @@ export default function Game() {
         msg: `Running ${runningCount > 0 ? `+${runningCount}` : runningCount} ÷ ${decksRemaining.toFixed(1)} decks = true count ${trueCount > 0 ? `+${trueCount}` : trueCount}`,
       });
       setHandsSinceCountPrompt(0);
-      setTimeout(() => {
-        setLives((cl) => {
-          if (cl <= 0) { endGame(); return cl; }
-          dealHand();
-          return cl;
-        });
-      }, 700);
+      setTimeout(() => dealHand(), 700);
     }
-  }, [phase, sub, mode, hands, combo, handsSinceCountPrompt, lives, dealHand, endGame, userCount, runningCount, decksRemaining, trueCount, pushBurst, pushToast, doShake]);
+  }, [phase, sub, mode, hands, combo, handsSinceCountPrompt, dealHand, endGame, userCount, runningCount, decksRemaining, trueCount, pushBurst, pushToast]);
 
   // Keyboard controls
   useEffect(() => {
@@ -419,6 +457,7 @@ export default function Game() {
               accent={combo > 0 ? "amber" : "neutral"}
               flashKey={comboFlashKey}
             />
+            <HudBox label="TIME" value={fmtDuration(elapsedMs)} />
             <div className="hidden sm:flex items-center gap-1.5 bg-black/40 rounded-xl px-3 py-2 border border-white/10">
               <span className="text-amber-300 text-sm">{MODE_META[mode].icon}</span>
               <span className="text-[10px] font-black tracking-[0.15em] text-neutral-300">
@@ -427,7 +466,6 @@ export default function Game() {
             </div>
           </div>
           <div className="flex items-center gap-1.5 sm:gap-2">
-            <Lives count={lives} />
             <button
               onClick={() => { setMuted(!muted); setMutedState(!muted); }}
               className="btn-juice w-9 h-9 rounded-lg bg-white/10 border border-white/20 text-white flex items-center justify-center"
@@ -611,10 +649,12 @@ export default function Game() {
       )}
       {phase === "gameover" && (
         <GameOverScreen
-          score={score}
-          hands={hands}
-          correct={correctCount}
-          bestStreak={bestCombo}
+          streak={bestCombo}
+          accuracy={hands > 0 ? Math.round((correctCount / hands) * 100) : 0}
+          timeMs={finalTimeMs}
+          avgMsPerHand={hands > 0 ? finalTimeMs / hands : 0}
+          lastMistake={lastMistake}
+          rangeActive={range.size > 0 && mode !== "count"}
           onRestart={startGame}
           onMenu={() => setPhase("menu")}
           newHigh={newHigh}
@@ -622,18 +662,18 @@ export default function Game() {
           name={name}
           setName={setName}
           onSave={() => {
+            if (rangeRef.current.size > 0 && modeRef.current !== "count") return;
             saveName(name);
             const entry: HighScore = {
               name: name || "Anon",
-              score,
-              accuracy: hands > 0 ? Math.round((correctCount / hands) * 100) : 0,
               streak: bestCombo,
-              hands,
+              timeMs: finalTimeMs,
+              avgMsPerHand: hands > 0 ? finalTimeMs / hands : 0,
               date: Date.now(),
               mode,
             };
             saveHighScore(entry);
-            setBestOverall((b) => Math.max(b, score));
+            setBestOverall((b) => Math.max(b, bestCombo));
             setNewHigh(false);
           }}
         />
@@ -670,19 +710,6 @@ function HudBox({ label, value, accent = "neutral", flashKey }: {
       >
         {value}
       </div>
-    </div>
-  );
-}
-
-function Lives({ count }: { count: number }) {
-  return (
-    <div className="flex gap-1 items-center bg-black/40 rounded-lg px-2 py-1.5 border border-white/10">
-      {Array.from({ length: 3 }).map((_, i) => (
-        <div key={i} className={cn(
-          "w-4 h-4 rounded-full transition-all",
-          i < count ? "chip" : "bg-neutral-800 border border-neutral-700"
-        )} />
-      ))}
     </div>
   );
 }
